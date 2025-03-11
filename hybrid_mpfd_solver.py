@@ -1,7 +1,7 @@
 
 
 
-import torch_mpfd_solver as solver
+import torch_mpfd_solver as torchsolver
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,73 +9,58 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
 
-class NN(nn.Module):
-    def __init__(self):
-        super(NN, self).__init__()
-        self.conv1 = nn.Conv1d(in_channels=2, out_channels=16, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(in_channels=16, out_channels=32, kernel_size=3, padding=1)
-        self.fc1 = nn.Linear(32, 64)
-        self.fc2 = nn.Linear(64, 1)
-
-    def forward(self, tN, phi_initial):
-        # Combine inputs and reshape for convolution
-        x = torch.cat((tN, phi_initial), dim=1).unsqueeze(2)
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = torch.flatten(x, start_dim=1)  # Flatten the output of the conv layers
-        x = F.relu(self.fc1(x))
-        delta_phi = self.fc2(x)
-        return delta_phi
-
-
-# Hybrid model run function incorporating the neural network
-class HybridModel(nn.Module):
-
-    #z,t,dz,n,nt,zN,psi,psiB,psiT,pars = solver.setup(dt,tN,zN,psiInitial)
-    #output, err = solver.ModelRun(dt,dz,n,nt,psi,psiB,psiT,pars)
-
-    def __init__(self, model_func, nn):
-        super(HybridModel, self).__init__()
-        self.model_func = model_func
-        self.nn = nn
-
-    def forward(self,dt,tN,zN,psi_initial):
-        z,t,dz,n,nt,zN,psi,psiB,psiT,pars = solver.setup(dt,tN,zN,psi_initial)
-        psi_approx_initial = self.model_func(tN, psi_initial)
-        delta_psi = self.nn(tN, psi_initial)
-        psi_approx = psi_approx_initial + delta_psi
-        return psi_approx
-
-
-
-
-
-
-
-#Downsampling training data
-def downsamplefun(vec_fine,scaling_ratio):
-    # Requires that fine vector comes from 
-    #ratio = int((len(vec_fine)-1)/(len(vec_coarse)-1))
-    #print(ratio)
-    return vec_fine[::scaling_ratio]
-
-class CustomDataset(Dataset):
-    def __init__(self, data, downsamplefun, scaling_ratio):
+class CorrectionNet(nn.Module):
+    def __init__(self, in_channels=2, out_channels=1):
         """
-        Args:
-            data (list of tuples): List of (tN, psiInitial, psiFinal) tuples.
-            downsamplefun (function): Function to downsample psiInitial and psiFinal.
-            scaling_ratio (float): Ratio used for downsampling.
+        in_channels: number of input channels 
+            (e.g., 1 channel for the state + 1 channel for dt)
+        out_channels: number of output channels for the correction
+            (e.g., same as number of state channels you want to predict)
         """
-        self.data = [
-            (tN, downsamplefun(psiInitial, scaling_ratio), downsamplefun(psiFinal, scaling_ratio))
-            for tN, psiInitial, psiFinal in data
-        ]
+        super(CorrectionNet, self).__init__()
+        
+        # Example: 2D convolution layers
+        self.conv1 = nn.Conv2d(in_channels, 16, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(16, out_channels, kernel_size=3, padding=1)
+        
+        self.activation = nn.ReLU()
+        
+    def forward(self, x):
+        # x shape: [batch_size, in_channels, height, width]
+        x = self.conv1(x)
+        x = self.activation(x)
+        x = self.conv2(x)
+        x = self.activation(x)
+        x = self.conv3(x)
+        # The output is the correction with shape [batch_size, out_channels, height, width]
+        return x
 
-    def __len__(self):
-        return len(self.data)
+#Instantiate correction_net 
+correction_net = CorrectionNet(in_channels=2, out_channels=1)
 
-    def __getitem__(self, idx):
-        tN, psiInitial, psiFinal = self.data[idx]
-        return tN, psiInitial, psiFinal
 
+def hybridSolverOneStepModelRun(dt,dz,n,psi,psiB,psiT,pars,Cfun,Kfun,thetafun,sink,correction_net):
+    """
+    s: [B, 1, H, W] (for example)
+    dt: [B] or [B, 1]
+    correction_net: instance of CorrectionNet
+    Returns: corrected next state
+    
+    """
+    # 1. Baseline solver
+    baseline_state = torchsolver.dirichletOneStepModelRun(dt,dz,n,psi,psiB,psiT,pars,Cfun,Kfun,thetafun,sink)
+    
+    # 2. Prepare input for correction net by concatenating dt
+    # If dt is shape [B], expand to [B, 1, H, W] to match image shape
+    B, C, H, W = psi.shape
+    dt_reshaped = dt.view(B, 1, 1, 1).expand(B, 1, H, W)
+    
+    # Concatenate along the channel dimension
+    cnn_input = torch.cat([psi, dt_reshaped], dim=1)  # shape [B, C+1, H, W]
+    
+    correction = correction_net(cnn_input)
+    
+    # 3. Sum baseline + correction
+    next_state = baseline_state + correction
+    return next_state

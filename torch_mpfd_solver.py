@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 import pandas as pd
 
 ### Parameters ###
@@ -24,8 +25,8 @@ def gardnerSetpars():
     gardnerPars['thetaR'] = 0.065
     gardnerPars['thetaS'] = 0.45
     gardnerPars['Ks'] = 3.466*10**(-5)
-    gardnerPars['lambda'] = 10**(-4)
-    gardnerPars['Rmax'] = 1.157*10**(-6)
+    gardnerPars['lambda'] = 10**(-2)
+    gardnerPars['Rmax'] = 1.157*10**(-1)
     gardnerPars['tStop'] = 2.592*10**(5)
 
     return gardnerPars
@@ -52,7 +53,7 @@ def havercampthetafun(psi, pars):
     theta = pars['thetaR'] + x1
     return theta
 
-def zeroFun(psi):
+def zeroFun(psi,pars):
     return 0
 
 def gardnerCfun(psi,pars):
@@ -67,11 +68,11 @@ def gardnerKfun(psi,pars):
 
 
 def gardnerthetafun(psi,pars):
-    theta = (pars['thetaS']-pars['thetaR'])*torch.exp(pars['lambda']*psi)
+    theta = (pars['thetaS']-pars['thetaR'])*torch.exp(pars['lambda']*psi) + pars['thetaR']
     return theta
 
 def gardnerhfun(theta,pars):
-    psi = (torch.log(theta) - torch.log(pars['thetaS']-pars['thetaR']))/pars['lambda']
+    psi = (np.log(theta-pars['thetaR']) - np.log(pars['thetaS']-pars['thetaR']))/pars['lambda']
     return psi
 
 
@@ -93,10 +94,13 @@ def gardnersinkfun(psi,pars):
     return S_h
 
 
-def gardnerinitialfun(t,pars):
-    theta = (2*pars['tStop']-t)/(2*pars['tStop']) * (0.1*pars['thetaR'] + 0.9*pars['theta_S'])
+def gardnertopboundaryfun(t,pars):
+    theta = (2*pars['tStop']-t)/(2*pars['tStop']) * (0.1*pars['thetaR'] + 0.9*pars['thetaS'])
     return theta
 
+def gardnerinitialprofile(z):
+    theta = 0.4115 + z/30 * (0.1035-0.4115)
+    return theta
 
 
 
@@ -119,7 +123,7 @@ def solverfun(R, C, Kmid, dt, dz, n):
 
     return dell
 
-def Rfun(psiiter, psiin, psiT, psiB, C, Kmid, dtheta, dt, dz, n,sink):
+def Rfun(psiiter, psiin, psiT, psiB, C, Kmid, dtheta, dt, dz, n,sink,pars):
     
     psigrid = torch.cat((psiB, psiiter, psiT))
     x1 = dtheta / dt * dz
@@ -127,7 +131,7 @@ def Rfun(psiiter, psiin, psiT, psiB, C, Kmid, dtheta, dt, dz, n,sink):
     x3 = -Kmid[1:] * (psigrid[2:] - psigrid[1:-1]) / dz
     x4 = Kmid[:-1] * (psigrid[1:-1] - psigrid[:-2]) / dz
 
-    R = x1 + x2 + x3 + x4 + sink(psiin)
+    R = x1 + x2 + x3 + x4 + sink(psiin,pars)
 
     return R
 
@@ -149,7 +153,7 @@ def neumannIterFun(psiin, pars, psiT, psiB, dt, dz, n,Cfun,Kfun,thetafun,sink):
         Kmid = (K[1:] + K[:-1]) / 2.
         dtheta = thetafun(psiiter, pars) - thetafun(psiin, pars)
 
-        R = Rfun(psiiter, psiin, psiT, psiiter[0]*dz, C, Kmid, dtheta, dt, dz, n,sink)
+        R = Rfun(psiiter, psiin, psiT, psiiter[0]*dz, C, Kmid, dtheta, dt, dz, n,sink,pars)
 
         dell = solverfun(R, C, Kmid, dt, dz, n)
         psiout = psiiter + dell
@@ -180,7 +184,7 @@ def dirichletIterFun(psiin, pars, psiT, psiB, dt, dz, n,Cfun,Kfun,thetafun,sink)
         dtheta = thetafun(psiiter, pars) - thetafun(psiin, pars)
 
 
-        R = Rfun(psiiter, psiin, psiT, psiB, C, Kmid, dtheta, dt, dz, n,sink)
+        R = Rfun(psiiter, psiin, psiT, psiB, C, Kmid, dtheta, dt, dz, n,sink,pars)
 
 
         dell = solverfun(R, C, Kmid, dt, dz, n)
@@ -226,19 +230,19 @@ def neumannOneStepModelRun(dt,dz,n,psi,psiB,psiT,pars,Cfun,Kfun,thetafun,sink):
 
     return psiNext
 
-def fullModelRun(dt,dts,dz,n,nt,psi,psiB,psiT,pars,Cfun,Kfun,thetafun,flag,sink):
+def fullModelRun(t,dts,dz,n,nt,psi,psiB,psiT,pars,Cfun,Kfun,thetafun,flag,sink):
     psiList = []
     psiList +=[psi]
 
     if flag==0:
         for j in range(1,nt):
-            psiList += [dirichletOneStepModelRun(dts[j-1],dz,n,psiList[j-1],psiB,psiT,pars,Cfun,Kfun,thetafun,sink)]
+            psiList += [dirichletOneStepModelRun(dts[j-1],dz,n,psiList[j-1],psiB[j-1],psiT[j-1],pars,Cfun,Kfun,thetafun,sink)]
         
 
     
     elif flag==1:
         for j in range(1,nt):
-            psiList += [neumannOneStepModelRun(dts[j-1],dz,n,psiList[j-1],dz*psiB,psiT,pars,Cfun,Kfun,thetafun,sink)]
+            psiList += [neumannOneStepModelRun(dts[j-1],dz,n,psiList[j-1],dz*psiB[j-1],psiT,pars,Cfun,Kfun,thetafun,sink)]
 
 
 
@@ -251,10 +255,10 @@ def fullModelRun(dt,dts,dz,n,nt,psi,psiB,psiT,pars,Cfun,Kfun,thetafun,flag,sink)
 
 def outputWrapper(psiList,flag,psiB,psiT):
     if flag==0:
-        output = [torch.hstack([psiB,k,psiT]) for k in psiList]
+        output = [torch.hstack([psiB[i],psiList[i],psiT[i]]) for i in range(len(psiList))]
     
     elif flag==1:
-        output = [torch.hstack([k[0],k,psiT]) for k in psiList]
+        output = [torch.hstack([psiList[i][0],psiList[i],psiT[i]]) for i in range(len(psiList))]
 
     return output
 
@@ -262,6 +266,7 @@ def outputWrapper(psiList,flag,psiB,psiT):
 
 
 def setup(dt, tN, zN, psiInitial,setpars):
+    #works only for constant dirichlet boundary conditions, as is.
     pars = setpars()
 
     dz = zN / (len(psiInitial) - 1)
@@ -283,11 +288,13 @@ def setup(dt, tN, zN, psiInitial,setpars):
     psi.requires_grad = True
 
     #psiB = torch.tensor([psiInitial[0]], dtype=torch.float32)
-    psiB = torch.tensor([psiInitial[0]], dtype=torch.float32)
-    psiT = torch.tensor([psiInitial[-1]], dtype=torch.float32)
+    psiB = [torch.tensor([psiInitial[0]], dtype=torch.float32) for _ in t]
+    psiT = [torch.tensor([psiInitial[-1]], dtype=torch.float32) for _ in t]
     
    
 
     #psi_list.append(psi)
 
     return z, t, dts, dz, n, nt, zN, psi, psiB, psiT, pars
+
+
